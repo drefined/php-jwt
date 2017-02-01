@@ -45,6 +45,23 @@ class JWT
         'RS256' => ['openssl', 'SHA256'],
     ];
 
+    public static function decodeWithoutVerification($jwt)
+    {
+        list($headb64, $bodyb64, $cryptob64) = static::parseToken($jwt);
+
+        if (null === ($header = static::jsonDecode(static::urlsafeB64Decode($headb64)))) {
+            throw new UnexpectedValueException('Invalid header encoding');
+        }
+
+        if (null === $payload = static::jsonDecode(static::urlsafeB64Decode($bodyb64))) {
+            throw new UnexpectedValueException('Invalid claims encoding');
+        }
+
+        $sig = static::urlsafeB64Decode($cryptob64);
+
+        return [$header, $payload, $sig];
+    }
+
     /**
      * Decodes a JWT string into a PHP object.
      *
@@ -78,22 +95,50 @@ class JWT
             throw new InvalidArgumentException('Algorithm not allowed');
         }
 
+        list($headb64, $bodyb64, $cryptob64) = static::parseToken($jwt);
+
+        $sig = static::urlsafeB64Decode($cryptob64);
+
+        list($key, $header) = static::verifyHeader($headb64, $key, $allowed_algs);
+
+        $payload = static::verifyPayload($bodyb64, $timestamp);
+
+        // Check the signature
+        if (!static::verify("{$headb64}.{$bodyb64}", $sig, $key, $header->alg)) {
+            throw new SignatureInvalidException('Signature verification failed');
+        }
+
+        return $payload;
+    }
+
+    /**
+     * @param string $jwt
+     *
+     * @return array
+     */
+    public static function parseToken($jwt)
+    {
         $tks = explode('.', $jwt);
 
         if (count($tks) != 3) {
             throw new UnexpectedValueException('Wrong number of segments');
         }
 
-        list($headb64, $bodyb64, $cryptob64) = $tks;
+        return $tks;
+    }
 
+    /**
+     * @param string       $headb64
+     * @param string|array $key
+     * @param array        $allowed_algs
+     *
+     * @return mixed|null
+     */
+    public static function verifyHeader($headb64, $key, $allowed_algs)
+    {
         if (null === ($header = static::jsonDecode(static::urlsafeB64Decode($headb64)))) {
             throw new UnexpectedValueException('Invalid header encoding');
         }
-
-        if (null === $payload = static::jsonDecode(static::urlsafeB64Decode($bodyb64))) {
-            throw new UnexpectedValueException('Invalid claims encoding');
-        }
-        $sig = static::urlsafeB64Decode($cryptob64);
 
         if (empty($header->alg)) {
             throw new UnexpectedValueException('Empty algorithm');
@@ -115,9 +160,13 @@ class JWT
             }
         }
 
-        // Check the signature
-        if (!static::verify("$headb64.$bodyb64", $sig, $key, $header->alg)) {
-            throw new SignatureInvalidException('Signature verification failed');
+        return [$key, $header];
+    }
+
+    public static function verifyPayload($bodyb64, $timestamp)
+    {
+        if (null === $payload = static::jsonDecode(static::urlsafeB64Decode($bodyb64))) {
+            throw new UnexpectedValueException('Invalid claims encoding');
         }
 
         // Check if the nbf if it is defined. This is the time that the
@@ -173,9 +222,10 @@ class JWT
             $header = array_merge($head, $header);
         }
 
-        $segments      = [];
-        $segments[]    = static::urlsafeB64Encode(static::jsonEncode($header));
-        $segments[]    = static::urlsafeB64Encode(static::jsonEncode($payload));
+        $segments   = [];
+        $segments[] = static::urlsafeB64Encode(static::jsonEncode($header));
+        $segments[] = static::urlsafeB64Encode(static::jsonEncode($payload));
+
         $signing_input = implode('.', $segments);
 
         $signature  = static::sign($signing_input, $key, $alg);
@@ -207,9 +257,11 @@ class JWT
         switch ($function) {
             case 'hash_hmac':
                 return hash_hmac($algorithm, $msg, $key, true);
+
             case 'openssl':
                 $signature = '';
                 $success   = openssl_sign($msg, $signature, $key, $algorithm);
+
                 if (!$success) {
                     throw new DomainException("OpenSSL unable to sign data");
                 } else {
@@ -252,15 +304,19 @@ class JWT
             case 'hash_hmac':
             default:
                 $hash = hash_hmac($algorithm, $msg, $key, true);
+
                 if (function_exists('hash_equals')) {
                     return hash_equals($signature, $hash);
                 }
+
                 $len = min(static::safeStrlen($signature), static::safeStrlen($hash));
 
                 $status = 0;
+
                 for ($i = 0; $i < $len; $i++) {
                     $status |= (ord($signature[$i]) ^ ord($hash[$i]));
                 }
+
                 $status |= (static::safeStrlen($signature) ^ static::safeStrlen($hash));
 
                 return ($status === 0);
